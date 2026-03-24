@@ -1,7 +1,7 @@
 # Spectral-Elements-For-Wave-Equation
 Code that uses spectral elements to solve numerically the wave equation in 1-D and 2-D.
 
-#`one_d_sem`: Solves the Wave equation in 1-D. 
+# `one_d_sem`: Solves the Wave equation in 1-D. 
 
 ## Key Simulation Variables
 
