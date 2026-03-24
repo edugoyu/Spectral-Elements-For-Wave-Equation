@@ -1,8 +1,7 @@
 # Spectral-Elements-For-Wave-Equation
 Code that uses spectral elements to solve numerically the wave equation in 1-D and 2-D.
 
-# Files
-#'one_d_sem': Solves the Wave equation in 1-D. 
+#`one_d_sem`: Solves the Wave equation in 1-D. 
 
 ## Key Simulation Variables
 
@@ -30,7 +29,7 @@ The program generates a file named `simulation_results.csv`.
 * **Subsequent rows:** Displacement $u(x)$ for every time step.
 
 ## Plot
-* Plotted using python with the file 'plots.py'. Computes the error also between the analytical and the numerical solution.
+* Plotted using python with the file `plots.py`. Computes the error also between the analytical and the numerical solution.
 
 ## Physical Properties
 The default configuration uses:
@@ -38,7 +37,7 @@ The default configuration uses:
 * **Elasticity ($E$):** Constant 1.0.
 * **Source Term ($f$):** Manufactured solution using a $sin(x)\cos(t)$ profile.
 
-# 'two_d_sem': Solves the Wave equation in 2-D. 
+# `two_d_sem`: Solves the Wave equation in 2-D. 
 
 ## ⚙️ Core Parameters
 
@@ -71,8 +70,8 @@ The default configuration uses:
 * **`u[3]`**: A matrix array storing three time generations: *Past*, *Present*, and *Future*.
 
 ## Plot
-* Plotted using python with the file 'plots2d.py'.
-* To plot the error we use 'error_plot_2d.py' if we use the initial conditions of which we have the analytical solution.
+* Plotted using python with the file `plots2d.py`.
+* To plot the error we use `error_plot_2d.py` if we use the initial conditions of which we have the analytical solution.
 
 
 # Requirements
