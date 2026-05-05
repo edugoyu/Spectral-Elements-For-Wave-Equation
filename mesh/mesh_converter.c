@@ -93,7 +93,7 @@ int main() {
     // Open the file
     FILE *file = fopen("simple_rectangle.dat", "r");
     if (!file) {
-        printf("Error: Could not open Mesh_3.dat. Make sure the file is in the same directory.\n");
+        printf("Error: Could not open .dat.\n");
         return 1;
     }
 
@@ -122,7 +122,7 @@ int main() {
 
     // 2. ALLOCATE AND READ CONNECTIVITY MATRIX (4 x quad_count)
     // Conn is the connectivity matrix for the simple mesh
-    // quad_count is the real number of elements (Salome creates elements with 2 vertices only, we eliminate them)
+    // quad_count is the real number of elements. The elements with 2 vertices (type 102) are on the boundary.
 
     int **conn = (int **)malloc(4 * sizeof(int *));
     for (int i = 0; i < 4; i++) {
@@ -364,7 +364,7 @@ int main() {
         printf("Successfully wrote high-order mesh to 'high_order_mesh.dat'\n");
     }
 
-// ==========================================
+    // ==========================================
     // --- 3. CLEANUP MEMORY ---
     // ==========================================
     
@@ -379,8 +379,6 @@ int main() {
     }
     free(conn);
 
-    // --- NEW: Free the edges matrix ---
-    // Remember to only loop up to 2, since we fixed the allocation bug!
     for (int i = 0; i < 2; i++) {
         free(edges[i]);
     }
