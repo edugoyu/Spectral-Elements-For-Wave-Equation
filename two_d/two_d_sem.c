@@ -3,21 +3,22 @@
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
+// #define NDEBUG
 
 // --- Global Variables ---
 double time_int = 10.0;
-int time_points = 5000;
+int time_points = 2000;
 double time_delta; 
 int MESH_MODE = 1; // 0 = Manual Rectangle, 1 = Read from .dat
-
+double c = 1.;
 
 double x_0 = 0.0, x_f = 10.0;
 double y_0 = 0.0, y_f = 6.0;
 double delta_x, delta_y;
 double Lx, Ly;
-int n_x = 20, n_y = 20;            // Number of intervals per axis
+int n_x = 30, n_y = 20;            // Number of intervals per axis
 int n_elements;
-int n_nodes = 6;      // Nodes per element per direction
+int n_nodes = 213;      // Nodes per element per direction
 int total_points;     // Will be calculated in main, total nodes in Omega
 matrix* xy_points = NULL;           // In row n, coordinates of point n in global ID
 matrix* center_element = NULL;     // Row n contains the center of element n
@@ -91,8 +92,12 @@ int main()
         FILE *fp = fopen("mesh/high_order_mesh.dat", "r");
         if (!fp) { printf("Error opening mesh file.\n"); return 1; }
 
-        fscanf(fp, "%d %d", &n_elements, &total_points);
+        if (fscanf(fp, "%d %d %d", &n_elements, &total_points, &n_nodes) != 3) {
+            fprintf(stderr, "Error: Failed to read mesh header\n");
+            return 1;
+        }
         rewind(fp);
+        printf("Number of elements->%d, number of points->%d, number of nodes per direction->%d\n", n_elements, total_points, n_nodes);
 
         // Allocate connectivity and points based on file data
         connectivity = (int**)malloc(n_nodes * n_nodes * sizeof(int*));
@@ -336,7 +341,11 @@ double elasticity(double x, double y) {
 }
 
 double f(double x, double y, double t) {
-    return 0.0;
+    double kx = c*M_PI / Lx;
+    double ky = c*M_PI / Ly;
+    double spatial_part = sin(kx*x) * sin(ky*y);
+    double factor = (pow(kx, 2) + pow(ky, 2)) - 1.0;
+    return factor * spatial_part * sin(t);
 }
 
 void F_e(double xi, double nu, int e, double *output) {     // Assuming equidistant elements in x and y direction
@@ -347,6 +356,10 @@ void F_e(double xi, double nu, int e, double *output) {     // Assuming equidist
 
 
 double jacobian_calc(int e, int i, int j) {
+
+    if(MESH_MODE == 0) {
+        return delta_x * delta_y / 4;
+    }
 
     double xi = getVectorElement(gll_points, i);
     double nu = getVectorElement(gll_points, j);
@@ -463,7 +476,7 @@ void init_from_file(int **connectivity, matrix *xy_points, FILE *fp) {
 
     int num_elements, num_nodes;
     
-    if (fscanf(fp, "%d %d", &num_elements, &num_nodes) != 2) {
+    if (fscanf(fp, "%d %d %d", &num_elements, &num_nodes, &n_nodes) != 3) {
         printf("Error: Could not read the header.\n");
         return;
     }
@@ -478,7 +491,10 @@ void init_from_file(int **connectivity, matrix *xy_points, FILE *fp) {
     // The file stores them as: X Y
     for (int i = 0; i < num_nodes; i++) {
         double x, y;
-        fscanf(fp, "%lf %lf", &x, &y);
+        if (fscanf(fp, "%lf %lf", &x, &y) != 2) {
+                fprintf(stderr, "Error: Failed to read coordinates at node %d\n", i);
+                // handle error
+            }
         
         setMatrixElement(xy_points, i, 0, x);
         setMatrixElement(xy_points, i, 1, y);
@@ -489,7 +505,11 @@ void init_from_file(int **connectivity, matrix *xy_points, FILE *fp) {
     for (int e = 0; e < num_elements; e++) {
         for (int local_id = 0; local_id < n_nodes * n_nodes; local_id++) {
             int global_id;
-            fscanf(fp, "%d", &global_id);
+
+            if (fscanf(fp, "%d", &global_id) != 1) {
+                printf("Error: Could not read global id.\n");
+                return;
+            }
             
             connectivity[local_id][e] = global_id;
         }
@@ -504,7 +524,12 @@ void init_from_file(int **connectivity, matrix *xy_points, FILE *fp) {
             
             for (int i = 0; i < num_boundary_nodes; i++) {
                 int b_node;
-                fscanf(fp, "%d", &b_node);
+
+                if (fscanf(fp, "%d", &b_node) != 1) {
+                        printf("Error: Could not read global id.\n");
+                        return;
+                    }
+            
                 boundary_nodes[b_node] = 1; // Flag this specific ID as a boundary
             }
             printf("Successfully loaded %d boundary nodes.\n", num_boundary_nodes);
@@ -609,20 +634,22 @@ double T(int m, int n, int i, int j, int l, int k, int e) {
 // }
 // ---------------------------------------With known analytical sol-------------------------------------------------
 void initial_conditions(matrix* u, vector* u_vel) {
+    double kx = c*M_PI / Lx;
+    double ky = c*M_PI / Ly;
     for (int i = 0; i < total_points; i++) {
         double x = getMatrixElement(xy_points, i, 0);
         double y = getMatrixElement(xy_points, i, 1);
         double val = analytical_sol(x, y, 0.0);
         setMatrixElement(u, 0, i, val);
-        setVectorElement(u_vel, i, 0.0); // Velocity is 0 at t=0 for cos(wt)
+        double vel = sin(kx*x) * sin(ky*y);
+        setVectorElement(u_vel, i, vel); 
     }
 }
 
 double analytical_sol(double x, double y, double t) {
-    double kx = M_PI / 1.00601787386982e+01;
-    double ky = M_PI / 6.03174075151332e+00;
-    double omega = sqrt(kx*kx + ky*ky); // for c=1
-    return sin(kx * x) * sin(ky * y) * cos(omega * t);
+    double kx = c*M_PI / Lx;
+    double ky = c*M_PI / Ly;
+    return sin(kx * x) * sin(ky * y) * sin(t);
 }
 
 double K(int i, int j, int m, int n, int e) {
