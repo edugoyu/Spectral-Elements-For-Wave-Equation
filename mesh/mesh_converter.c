@@ -3,6 +3,7 @@
 #include "../Linear-Algebra-C/linear-algebra.h"
 #include "../Linear-Algebra-C/polylib.h"
 #include <math.h>
+#include <string.h>
 
 double l_pos(double x) {
     return (x+1)/2;
@@ -91,9 +92,9 @@ int main() {
     int p = 6;
 
     // Open the file
-    FILE *file = fopen("simple_rectangle.dat", "r");
+    FILE *file = fopen("marmousi_rectangle_finer.dat", "r");
     if (!file) {
-        printf("Error: Could not open .dat.\n");
+        printf("Error: Could not open Mesh_3.dat. Make sure the file is in the same directory.\n");
         return 1;
     }
 
@@ -113,16 +114,16 @@ int main() {
         
         int id;
         double x, y, z;
-        fscanf(file, "%d %lf %lf %lf", &id, &x, &y, &z);
+        if(fscanf(file, "%d %lf %lf %lf", &id, &x, &y, &z)!= 4) printf("Error scaning\n");
         
         // Store Y and Z only
-        coords[id - 1][0] = y;
-        coords[id - 1][1] = z;
+        coords[id - 1][0] = x;
+        coords[id - 1][1] = y;
     }
 
     // 2. ALLOCATE AND READ CONNECTIVITY MATRIX (4 x quad_count)
     // Conn is the connectivity matrix for the simple mesh
-    // quad_count is the real number of elements. The elements with 2 vertices (type 102) are on the boundary.
+    // quad_count is the real number of elements (Salome creates elements with 2 vertices only, we eliminate them)
 
     int **conn = (int **)malloc(4 * sizeof(int *));
     for (int i = 0; i < 4; i++) {
@@ -140,11 +141,11 @@ int main() {
 
     for (int i = 0; i < total_elements; i++) {
         int id, type;
-        fscanf(file, "%d %d", &id, &type);
+        if(fscanf(file, "%d %d", &id, &type)!=2) printf("error scanning\n");
         
         if (type == 102) {
             int n1, n2;
-            fscanf(file, "%d %d", &n1, &n2);
+            if(fscanf(file, "%d %d", &n1, &n2)!=2) printf("error scanning\n");
             edges[0][edge_count] = n1 - 1;
             edges[1][edge_count] = n2 - 1;
             edge_count++;
@@ -152,7 +153,7 @@ int main() {
         else if (type == 204) {
             // STORE QUADRILATERAL ELEMENTS
             int n1, n2, n3, n4;
-            fscanf(file, "%d %d %d %d", &n1, &n2, &n3, &n4);
+            if(fscanf(file, "%d %d %d %d", &n1, &n2, &n3, &n4)!=4) printf("error scanning\n");
             conn[0][quad_count] = n1 - 1;
             conn[1][quad_count] = n2 - 1;
             conn[2][quad_count] = n3 - 1;
@@ -329,7 +330,7 @@ int main() {
         printf("Error: Could not create high_order_mesh.dat.\n");
     } else {
         // Line 1: Number of elements and total unique nodes
-        fprintf(out_file, "%d %d\n", quad_count, node_counter);
+        fprintf(out_file, "%d %d %d\n", quad_count, node_counter, p);
         
         // Next lines: xy_points (coordinates)
         for (int i = 0; i < node_counter; i++) {
@@ -364,7 +365,7 @@ int main() {
         printf("Successfully wrote high-order mesh to 'high_order_mesh.dat'\n");
     }
 
-    // ==========================================
+// ==========================================
     // --- 3. CLEANUP MEMORY ---
     // ==========================================
     
@@ -379,6 +380,8 @@ int main() {
     }
     free(conn);
 
+    // --- NEW: Free the edges matrix ---
+    // Remember to only loop up to 2, since we fixed the allocation bug!
     for (int i = 0; i < 2; i++) {
         free(edges[i]);
     }
