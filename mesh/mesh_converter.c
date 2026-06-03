@@ -380,8 +380,6 @@ int main() {
     }
     free(conn);
 
-    // --- NEW: Free the edges matrix ---
-    // Remember to only loop up to 2, since we fixed the allocation bug!
     for (int i = 0; i < 2; i++) {
         free(edges[i]);
     }
