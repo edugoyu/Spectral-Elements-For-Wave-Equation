@@ -6,19 +6,22 @@
 // #define NDEBUG
 
 // --- Global Variables ---
-double time_int = 10.0;
-int time_points = 2000;
+double time_int = 20.0;
+int time_points = 5000;
 double time_delta; 
-int MESH_MODE = 1; // 0 = Manual Rectangle, 1 = Read from .dat
+int MESH_MODE = 0; // 0 = Manual Rectangle, 1 = Read from .dat
+int PML = 1; // PML can only be used in MESH_MODE = 0, it is present if PML = 1, and not present if PML = 0
+int PML_layers = 8;
+int boundary_conditions = 0;   // If 1, Dirichlet, if 0, Neumann
 double c = 1.;
 
-double x_0 = 0.0, x_f = 10.0;
-double y_0 = 0.0, y_f = 6.0;
+double x_0 = 0.0, x_f = 100.0;
+double y_0 = 0.0, y_f = 100.0;
 double delta_x, delta_y;
 double Lx, Ly;
-int n_x = 30, n_y = 20;            // Number of intervals per axis
+int n_x = 30, n_y = 30;            // Number of intervals per axis
 int n_elements;
-int n_nodes = 213;      // Nodes per element per direction
+int n_nodes = 6;      // Nodes per element per direction
 int total_points;     // Will be calculated in main, total nodes in Omega
 matrix* xy_points = NULL;           // In row n, coordinates of point n in global ID
 matrix* center_element = NULL;     // Row n contains the center of element n
@@ -35,6 +38,27 @@ matrix* D = NULL;
 matrix* Dt = NULL;
 vector* Ku = NULL;
 
+// CPML Global Variables
+matrix* psi_x = NULL;
+matrix* psi_y = NULL;
+matrix* zeta_x = NULL;
+matrix* zeta_y = NULL;
+
+vector* a_x = NULL;
+vector* b_x = NULL;
+vector* a_y = NULL;
+vector* b_y = NULL;
+
+vector* du_dx = NULL;
+vector* du_dy = NULL;
+vector* d2u_dx2 = NULL;
+vector* d2u_dy2 = NULL;
+vector* dpsi_x_dx = NULL; 
+vector* dpsi_y_dy = NULL;
+vector* node_multiplicity = NULL; 
+vector* F_cpml_vec = NULL; // Holds the integrated weak-form CPML forces
+
+
 // --- Function Prototypes ---
 double density(double x, double y);
 double elasticity(double x, double y);
@@ -50,6 +74,10 @@ void saveStepToFile(FILE *fp, matrix* u, int total_points);
 double analytical_sol(double x, double y, double t);
 double jacobian_calc(int e, int i, int j);
 int is_boundary(int global_id);
+double calculate_pml_sigma(double distance, double thickness, double wave_velocity);
+void init_cpml_profiles();
+void comp_F_cpml(vector* F_cpml);
+void compute_spatial_derivatives(matrix* field, vector* d_dx, vector* d_dy, vector* d2_dx2, vector* d2_dy2, int compute_second_order);
 
 int main()
 {
@@ -63,8 +91,18 @@ int main()
 
     if (MESH_MODE == 0) {
         printf("Mode: Manual Grid Generation\n");
+
         Lx = x_f - x_0; Ly = y_f - y_0;
         delta_x = Lx / n_x; delta_y = Ly / n_y;
+
+        if(PML == 1) {
+            x_f = x_f + delta_x * PML_layers;
+            x_0 = x_0 - delta_x * PML_layers;
+            y_f = y_f + delta_y * PML_layers;
+            n_x = n_x + 2 * PML_layers;
+            n_y = n_y + PML_layers;
+        }
+
         n_elements = n_x * n_y;
         total_points = (n_x * (n_nodes - 1) + 1) * (n_y * (n_nodes - 1) + 1);
 
@@ -196,6 +234,12 @@ int main()
     }
 
     vector* Ku = zeroVector(total_points);
+
+    if (PML == 1) {
+        printf("Initializing Weak-Form CPML Profiles...\n");
+        init_cpml_profiles();
+    }
+
     // Time loop 
     printf("Starting time steps\n");
     for(int t_i=0; t_i<time_points-1; t_i++){
@@ -239,8 +283,8 @@ int main()
                 double x = getMatrixElement(xy_points, m, 0);
                 double y = getMatrixElement(xy_points, m, 1);
 
-                // Do not calculate if the node is in the edges (Neumann conditions)
-                if (is_boundary(m) == 1) {
+                // Boundary conditions
+                if (is_boundary(m) * boundary_conditions == 1) {
                     setMatrixElement(u[1], 0, m, 0.0); 
                 }
                 else{
@@ -257,31 +301,99 @@ int main()
         }
 
         // Other cases
-        else{
-            // Computation of Ku
+        else {
+            // Compute Ku
             comp_Ku(Ku, u[1]);
-            for (int d = 0; d < total_points; d++) {
-                double x = getMatrixElement(xy_points, d, 0);
-                double y = getMatrixElement(xy_points, d, 1);
 
-                if (is_boundary(d) == 1) {
-                    setMatrixElement(u[2], 0, d, 0.0); 
+            if (PML == 1) {
+                // Calculate inner domain limits once for the loop
+                double L_pml_x = PML_layers * delta_x;
+                double L_pml_y = PML_layers * delta_y;
+                double x_inner_min = x_0 + L_pml_x;
+                double x_inner_max = x_f - L_pml_x;
+                double y_inner_max = y_f - L_pml_y;
+
+                compute_spatial_derivatives(u[1], du_dx, du_dy, d2u_dx2, d2u_dy2, 1);
+
+                //  Update Psi
+                for (int m = 0; m < total_points; m++) {
+                    double x = getMatrixElement(xy_points, m, 0);
+                    double y = getMatrixElement(xy_points, m, 1);
+                    
+                    // Skip inner domain nodes completely
+                    if (x >= x_inner_min && x <= x_inner_max && y <= y_inner_max) continue;
+
+                    double px_new = getVectorElement(a_x, m) * getMatrixElement(psi_x, 0, m) + getVectorElement(b_x, m) * getVectorElement(du_dx, m);
+                    double py_new = getVectorElement(a_y, m) * getMatrixElement(psi_y, 0, m) + getVectorElement(b_y, m) * getVectorElement(du_dy, m);
+                    
+                    setMatrixElement(psi_x, 0, m, px_new);
+                    setMatrixElement(psi_y, 0, m, py_new);
                 }
-                else{
-                    double Ku_d = getVectorElement(Ku, d);
 
-                    // Now we use Ku_d in the central difference formula
-                    double M_inv_d = getVectorElement(M_inv, d);
-                    double F_d = getVectorElement(vector_f, d);
-                    double u_curr = getMatrixElement(u[1], 0, d);
-                    double u_old  = getMatrixElement(u[0], 0, d);
+                // Get the spatial derivative of Psi 
+                compute_spatial_derivatives(psi_x, dpsi_x_dx, du_dy, d2u_dx2, d2u_dy2, 0); 
+                compute_spatial_derivatives(psi_y, du_dx, dpsi_y_dy, d2u_dx2, d2u_dy2, 0);
 
-                    double accel = (F_d - Ku_d) * M_inv_d;
-                    double u_next = (time_delta * time_delta * accel) + (2.0 * u_curr) - u_old;
+                // 5. Update Zeta
+                for (int d = 0; d < total_points; d++) {
+                    double x = getMatrixElement(xy_points, d, 0);
+                    double y = getMatrixElement(xy_points, d, 1);
+                    
+                    // OPTIMIZATION: Skip inner domain nodes completely
+                    if (x >= x_inner_min && x <= x_inner_max && y <= y_inner_max) continue;
 
-                    setMatrixElement(u[2], 0, d, u_next);
+                    double zx_new = getVectorElement(a_x, d) * getMatrixElement(zeta_x, 0, d) + 
+                                    getVectorElement(b_x, d) * (getVectorElement(d2u_dx2, d) + getVectorElement(dpsi_x_dx, d));
+                    double zy_new = getVectorElement(a_y, d) * getMatrixElement(zeta_y, 0, d) + 
+                                    getVectorElement(b_y, d) * (getVectorElement(d2u_dy2, d) + getVectorElement(dpsi_y_dy, d));
+                    
+                    setMatrixElement(zeta_x, 0, d, zx_new);
+                    setMatrixElement(zeta_y, 0, d, zy_new);
+                }
+
+                // Integrate CPML forces into the Weak Form 
+                comp_F_cpml(F_cpml_vec);
+
+                // Calculate Acceleration and Advance Time
+                for (int d = 0; d < total_points; d++) {
+                    if (is_boundary(d) * boundary_conditions == 1) {
+                        setMatrixElement(u[2], 0, d, 0.0); 
+                    } else {
+                        double Ku_d = getVectorElement(Ku, d);
+                        double F_cpml_d = getVectorElement(F_cpml_vec, d); 
+                        double M_inv_d = getVectorElement(M_inv, d);
+                        double F_d = getVectorElement(vector_f, d);
+                        
+                        double accel = (F_d - Ku_d + F_cpml_d) * M_inv_d;
+                        
+                        double u_curr = getMatrixElement(u[1], 0, d);
+                        double u_old  = getMatrixElement(u[0], 0, d);
+                        double u_next = (time_delta * time_delta * accel) + (2.0 * u_curr) - u_old;
+
+                        setMatrixElement(u[2], 0, d, u_next);
+                    }
+                }
+            } 
+            else {
+                // --- STANDARD SOLVER (PML OFF) ---
+                for (int d = 0; d < total_points; d++) {
+                    if (is_boundary(d) * boundary_conditions == 1) {
+                        setMatrixElement(u[2], 0, d, 0.0); 
+                    } else {
+                        double Ku_d = getVectorElement(Ku, d);
+                        double M_inv_d = getVectorElement(M_inv, d);
+                        double F_d = getVectorElement(vector_f, d);
+                        double u_curr = getMatrixElement(u[1], 0, d);
+                        double u_old  = getMatrixElement(u[0], 0, d);
+
+                        double accel = (F_d - Ku_d) * M_inv_d;
+                        double u_next = (time_delta * time_delta * accel) + (2.0 * u_curr) - u_old;
+
+                        setMatrixElement(u[2], 0, d, u_next);
+                    }
                 }
             }
+
             // Save results and swap the generations
             if(t_i % 50 == 0) saveStepToFile(results_fp, u[2], total_points);
             matrix* temp = u[0];
@@ -320,7 +432,30 @@ int main()
     deleteVector(Ku);
     deleteVector(M_inv);
     free(local_K);
-    free(boundary_nodes);    
+    free(boundary_nodes);  
+    if (PML == 1) {
+        deleteMatrix(psi_x);
+        deleteMatrix(psi_y);
+        deleteMatrix(zeta_x);
+        deleteMatrix(zeta_y);
+
+        deleteVector(a_x);
+        deleteVector(b_x);
+        deleteVector(a_y);
+        deleteVector(b_y);
+        
+        deleteVector(du_dx);
+        deleteVector(du_dy);
+        deleteVector(d2u_dx2);
+        deleteVector(d2u_dy2);
+        
+        deleteVector(dpsi_x_dx);
+        deleteVector(dpsi_y_dy);
+        
+        deleteVector(node_multiplicity);
+        deleteVector(F_cpml_vec);
+    }
+
     return 0;
 }
 
@@ -328,24 +463,40 @@ double density(double x, double y) {
     return 1.0;
 }
 
-// double density(double x, double y) {
-//     double cx = 5.0; // Center X
-//     double cy = 3.0; // Center Y
-//     double sigma = 2.0;
-//     // Creates a bell-curve density centered at (5,3)
-//     return 1.0 + 5.0 * exp(-((x - cx) * (x - cx) + (y - cy) * (y - cy)) / (2 * sigma * sigma));
-// }
 
 double elasticity(double x, double y) {
     return 1.0;
 }
 
+// Ricker Wavelet
 double f(double x, double y, double t) {
-    double kx = c*M_PI / Lx;
-    double ky = c*M_PI / Ly;
-    double spatial_part = sin(kx*x) * sin(ky*y);
-    double factor = (pow(kx, 2) + pow(ky, 2)) - 1.0;
-    return factor * spatial_part * sin(t);
+    // --- 1. Source Parameters ---
+    double f_p = 25.0;            // Peak frequency of the Ricker wavelet (Hz)
+    double t_d = 1.2 / f_p;       // Time delay to make the source causal (starts at 0)
+    double amplitude = 100.0;     // Overall strength of the source
+
+    // --- 2. Target Location ---
+    // x_s: Exactly halfway between the left and right boundaries
+    // y_s: Placed at the surface (y_0)
+    double x_s = (x_0 + x_f) / 2.0; 
+    double y_s = y_0 + 0.1 * delta_y;             
+    
+    // Spatial width of the source (sigma)
+    double sigma = delta_x;       
+
+    // --- 3. Time Component (Ricker Wavelet) ---
+    // Formula: (1 - 2 * (pi * f_p * (t - t_d))^2) * exp(-(pi * f_p * (t - t_d))^2)
+    double arg = M_PI * f_p * (t - t_d);
+    double arg_sq = arg * arg;
+    double ricker_time = (1.0 - 2.0 * arg_sq) * exp(-arg_sq*10);
+
+    // --- 4. Spatial Component (Gaussian Distribution) ---
+    // Distributes the source energy over a small local area to prevent ringing
+    double dist_sq = (x - x_s) * (x - x_s) + (y - y_s) * (y - y_s);
+    double spatial_dist = exp(-dist_sq / (2.0 * sigma * sigma));
+
+    // Combine space, time, and amplitude
+    return amplitude * spatial_dist * ricker_time;
 }
 
 void F_e(double xi, double nu, int e, double *output) {     // Assuming equidistant elements in x and y direction
@@ -600,56 +751,11 @@ double T(int m, int n, int i, int j, int l, int k, int e) {
     return term1 + term2 + term3;
 }
 
-// void initial_conditions(matrix* u, vector* u_vel) {
 
-//     for (int i=0; i<total_points; i++){
-//         double x = getMatrixElement(xy_points, i, 0);
-//         double y = getMatrixElement(xy_points, i, 1);
-//         double init_u = 0;
-//         double init_u_vel = 0;
-//         setMatrixElement(u, 0, i, init_u);
-//         setVectorElement(u_vel, i, init_u_vel);
-//     }
-//     return;
-// }
-
-// ------------------------------------------Droplet--------------------------------------
-// void initial_conditions(matrix* u, vector* u_vel) {
-//     double cx = 5.0, cy = 5.0; // Center of the pulse
-//     double sigma = 0.3;        // Width of the pulse
-//     double amplitude = 1.0;
-
-//     for (int i = 0; i < total_points; i++) {
-//         double x = getMatrixElement(xy_points, i, 0);
-//         double y = getMatrixElement(xy_points, i, 1);
-        
-//         // Gaussian pulse formula: A * exp(-(dist^2)/(2*sigma^2))
-//         double dist_sq = (x - cx) * (x - cx) + (y - cy) * (y - cy);
-//         double val = amplitude * exp(-dist_sq / (2 * sigma * sigma));
-        
-//         setMatrixElement(u, 0, i, val);    // Initial displacement (u_0)
-//         // setMatrixElement(u, 0, i, val);    // Assume u_1 is same for zero velocity start
-//         setVectorElement(u_vel, i, 0.0);   // Initial velocity is zero
-//     }
-// }
-// ---------------------------------------With known analytical sol-------------------------------------------------
 void initial_conditions(matrix* u, vector* u_vel) {
-    double kx = c*M_PI / Lx;
-    double ky = c*M_PI / Ly;
-    for (int i = 0; i < total_points; i++) {
-        double x = getMatrixElement(xy_points, i, 0);
-        double y = getMatrixElement(xy_points, i, 1);
-        double val = analytical_sol(x, y, 0.0);
-        setMatrixElement(u, 0, i, val);
-        double vel = sin(kx*x) * sin(ky*y);
-        setVectorElement(u_vel, i, vel); 
-    }
-}
-
-double analytical_sol(double x, double y, double t) {
-    double kx = c*M_PI / Lx;
-    double ky = c*M_PI / Ly;
-    return sin(kx * x) * sin(ky * y) * sin(t);
+        
+    setMatrixElement(u, 0, i, 0);    // Initial displacement (u_0)
+    setVectorElement(u_vel, i, 0.0);   // Initial velocity is zero
 }
 
 double K(int i, int j, int m, int n, int e) {
@@ -710,7 +816,6 @@ void saveStepToFile(FILE *fp, matrix* u, int total_points) {
     if (fp == NULL) return;
 
     for (int j = 0; j < total_points; j++) {
-        // Use %e for scientific notation (better for small wave amplitudes)
         fprintf(fp, "%.7e%s", getMatrixElement(u, 0, j), (j == total_points- 1) ? "" : ",");
     }
     fprintf(fp, "\n"); // New line for the next time step
@@ -735,5 +840,216 @@ int is_boundary(int global_id) {
             return 1;
         }
         return 0;
+    }
+}
+
+
+// ----------------------------------------------   CPML FUNCTIONS   ----------------------------------------------------
+
+// Damping Profile
+double calculate_pml_sigma(double distance, double thickness, double wave_velocity) {
+    double R = 1e-5; 
+    double m = 2.0;  
+
+    if (thickness <= 0.0 || distance <= 0.0) return 0.0;
+    if (distance > thickness) distance = thickness;
+
+    double sigma_max = (3.0 * wave_velocity) / (2.0 * thickness) * log(1.0 / R);
+    return sigma_max * pow(distance / thickness, m);
+}
+
+
+// Initialization of CPML vectors and calculation of a_x and b_x
+void init_cpml_profiles() {
+    psi_x = zeroMatrix(1, total_points);   psi_y = zeroMatrix(1, total_points);
+    zeta_x = zeroMatrix(1, total_points);  zeta_y = zeroMatrix(1, total_points);
+    a_x = zeroVector(total_points);     b_x = zeroVector(total_points);
+    a_y = zeroVector(total_points);     b_y = zeroVector(total_points);
+    
+    du_dx = zeroVector(total_points);     du_dy = zeroVector(total_points);
+    d2u_dx2 = zeroVector(total_points);   d2u_dy2 = zeroVector(total_points);
+    dpsi_x_dx = zeroVector(total_points); dpsi_y_dy = zeroVector(total_points);
+    node_multiplicity = zeroVector(total_points);
+    F_cpml_vec = zeroVector(total_points);
+
+    double L_pml_x = PML_layers * delta_x;
+    double L_pml_y = PML_layers * delta_y;
+    double x_inner_min = x_0 + L_pml_x;
+    double x_inner_max = x_f - L_pml_x;
+    double y_inner_max = y_f - L_pml_y;
+    
+    double v_p = sqrt(60.0 / 1.0);
+
+    double alpha = 0.5; 
+
+    for (int i = 0; i < total_points; i++) {
+        double x = getMatrixElement(xy_points, i, 0);
+        double y = getMatrixElement(xy_points, i, 1);
+        
+        double sig_x = 0.0, sig_y = 0.0;
+
+        // X is active on both sides
+        if (x < x_inner_min) sig_x = calculate_pml_sigma(x_inner_min - x, L_pml_x, v_p);
+        else if (x > x_inner_max) sig_x = calculate_pml_sigma(x - x_inner_max, L_pml_x, v_p);
+
+        // Y is only active at the upper limit (y_f)
+        if (y > y_inner_max) sig_y = calculate_pml_sigma(y - y_inner_max, L_pml_y, v_p);
+
+        double alp_x = (sig_x > 0) ? alpha : 0.0;
+        double ax_val = exp(-(sig_x + alp_x) * time_delta);
+        double bx_val = (sig_x > 0) ? (sig_x / (sig_x + alp_x)) * (ax_val - 1.0) : 0.0;
+        setVectorElement(a_x, i, ax_val);
+        setVectorElement(b_x, i, bx_val);
+
+        double alp_y = (sig_y > 0) ? alpha : 0.0;
+        double ay_val = exp(-(sig_y + alp_y) * time_delta);
+        double by_val = (sig_y > 0) ? (sig_y / (sig_y + alp_y)) * (ay_val - 1.0) : 0.0;
+        setVectorElement(a_y, i, ay_val);
+        setVectorElement(b_y, i, by_val);
+    }
+}
+
+// Weak formulation of the CPML function
+void comp_F_cpml(vector* F_cpml) {
+    fillVector(&F_cpml, 0.0);
+    
+    // Calculate boundaries of the domain
+    double L_pml_x = PML_layers * delta_x;
+    double L_pml_y = PML_layers * delta_y;
+    double x_inner_min = x_0 + L_pml_x;
+    double x_inner_max = x_f - L_pml_x;
+    double y_inner_max = y_f - L_pml_y;
+    
+    for(int e = 0; e < n_elements; e++){
+
+        // Get the coordinates of the first and last node to find the element's bounding box
+        int id_first = connectivity[0][e];
+        int id_last = connectivity[n_nodes * n_nodes - 1][e];
+        
+        double x_min = fmin(getMatrixElement(xy_points, id_first, 0), getMatrixElement(xy_points, id_last, 0));
+        double x_max = fmax(getMatrixElement(xy_points, id_first, 0), getMatrixElement(xy_points, id_last, 0));
+        double y_max = fmax(getMatrixElement(xy_points, id_first, 1), getMatrixElement(xy_points, id_last, 1));
+        
+        // If the entire element is safely inside the inner domain, skip it
+        if (x_min >= x_inner_min && x_max <= x_inner_max && y_max <= y_inner_max) {
+            continue; 
+        }
+        // If not, apply the math
+        for(int i = 0; i < n_nodes; i++){
+            for(int j = 0; j < n_nodes; j++){
+                int global_id_ij = connectivity[i*n_nodes+j][e];
+                double w_i = getVectorElement(gll_weights, i);
+                double w_j = getVectorElement(gll_weights, j);
+                double jacobian_ij = jacobian_calc(e, i, j);
+                
+                double x_ij = getMatrixElement(xy_points, global_id_ij, 0);
+                double y_ij = getMatrixElement(xy_points, global_id_ij, 1);
+                double mu_ij = elasticity(x_ij, y_ij); 
+                
+                double zx = getMatrixElement(zeta_x, 0, global_id_ij);
+                double zy = getMatrixElement(zeta_y, 0, global_id_ij);
+                
+                double term1 = w_i * w_j * jacobian_ij * mu_ij * (zx + zy);
+                
+                double term2_x = 0.0;
+                for (int l = 0; l < n_nodes; l++) {
+                    int global_id_lj = connectivity[l*n_nodes+j][e];
+                    double w_l = getVectorElement(gll_weights, l);
+                    double jac_lj = jacobian_calc(e, l, j);
+                    double x_lj = getMatrixElement(xy_points, global_id_lj, 0);
+                    double y_lj = getMatrixElement(xy_points, global_id_lj, 1);
+                    double mu_lj = elasticity(x_lj, y_lj);
+                    double psi_x_lj = getMatrixElement(psi_x, 0, global_id_lj);
+                    
+                    term2_x += w_l * w_j * jac_lj * mu_lj * getMatrixElement(D, l, i) * (2.0 / delta_x) * psi_x_lj;
+                }
+                
+                double term2_y = 0.0;
+                for (int k = 0; k < n_nodes; k++) {
+                    int global_id_ik = connectivity[i*n_nodes+k][e];
+                    double w_k = getVectorElement(gll_weights, k);
+                    double jac_ik = jacobian_calc(e, i, k);
+                    double x_ik = getMatrixElement(xy_points, global_id_ik, 0);
+                    double y_ik = getMatrixElement(xy_points, global_id_ik, 1);
+                    double mu_ik = elasticity(x_ik, y_ik);
+                    double psi_y_ik = getMatrixElement(psi_y, 0, global_id_ik);
+                    
+                    term2_y += w_i * w_k * jac_ik * mu_ik * getMatrixElement(D, k, j) * (2.0 / delta_y) * psi_y_ik;
+                }
+                
+                // Assemble to global node
+                double current_F = getVectorElement(F_cpml, global_id_ij);
+                setVectorElement(F_cpml, global_id_ij, current_F + term1 - term2_x - term2_y);
+            }
+        }
+    }
+}
+
+// Derivative Engine
+void compute_spatial_derivatives(matrix* field, vector* d_dx, vector* d_dy, vector* d2_dx2, vector* d2_dy2, int compute_second_order) {
+    fillVector(&d_dx, 0.0); fillVector(&d_dy, 0.0);
+    if (compute_second_order) { fillVector(&d2_dx2, 0.0); fillVector(&d2_dy2, 0.0); }
+    fillVector(&node_multiplicity, 0.0);
+
+    for (int e = 0; e < n_elements; e++) {
+        double xi_x = 2.0 / delta_x;
+        double nu_y = 2.0 / delta_y; 
+
+        // Boundary box optimization: skip inner domain
+        int id_first = connectivity[0][e];
+        int id_last = connectivity[n_nodes * n_nodes - 1][e];
+        double x_inner_min = x_0 + (PML_layers * delta_x);
+        double x_inner_max = x_f - (PML_layers * delta_x);
+        double y_inner_max = y_f - (PML_layers * delta_y);
+        
+        double x_min = fmin(getMatrixElement(xy_points, id_first, 0), getMatrixElement(xy_points, id_last, 0));
+        double x_max = fmax(getMatrixElement(xy_points, id_first, 0), getMatrixElement(xy_points, id_last, 0));
+        double y_max = fmax(getMatrixElement(xy_points, id_first, 1), getMatrixElement(xy_points, id_last, 1));
+        
+        if (x_min >= x_inner_min && x_max <= x_inner_max && y_max <= y_inner_max) continue; 
+
+        for (int i = 0; i < n_nodes; i++) {
+            for (int j = 0; j < n_nodes; j++) {
+                int global_id = connectivity[i * n_nodes + j][e];
+                double local_d_dxi = 0.0, local_d_dnu = 0.0;
+                double local_d2_dxi2 = 0.0, local_d2_dnu2 = 0.0;
+
+                for (int m = 0; m < n_nodes; m++) {
+                    double val_x = getMatrixElement(field, 0, connectivity[m * n_nodes + j][e]);
+                    local_d_dxi += getMatrixElement(D, i, m) * val_x;
+
+                    double val_y = getMatrixElement(field, 0, connectivity[i * n_nodes + m][e]);
+                    local_d_dnu += getMatrixElement(D, j, m) * val_y;
+
+                    if (compute_second_order) {
+                        for (int k = 0; k < n_nodes; k++) {
+                            // 2nd derivatives aligned with their respective axes
+                            local_d2_dxi2 += getMatrixElement(D, i, m) * getMatrixElement(D, m, k) * getMatrixElement(field, 0, connectivity[k * n_nodes + j][e]);
+                            local_d2_dnu2 += getMatrixElement(D, j, m) * getMatrixElement(D, m, k) * getMatrixElement(field, 0, connectivity[i * n_nodes + k][e]);
+                        }
+                    }
+                }
+                
+                setVectorElement(d_dx, global_id, getVectorElement(d_dx, global_id) + local_d_dxi * xi_x);
+                setVectorElement(d_dy, global_id, getVectorElement(d_dy, global_id) + local_d_dnu * nu_y);
+                if (compute_second_order) {
+                    setVectorElement(d2_dx2, global_id, getVectorElement(d2_dx2, global_id) + local_d2_dxi2 * (xi_x * xi_x));
+                    setVectorElement(d2_dy2, global_id, getVectorElement(d2_dy2, global_id) + local_d2_dnu2 * (nu_y * nu_y));
+                }
+                setVectorElement(node_multiplicity, global_id, getVectorElement(node_multiplicity, global_id) + 1.0);
+            }
+        }
+    }
+
+    for (int i = 0; i < total_points; i++) {
+        double mult = getVectorElement(node_multiplicity, i);
+        if (mult > 0) {
+            setVectorElement(d_dx, i, getVectorElement(d_dx, i) / mult);
+            setVectorElement(d_dy, i, getVectorElement(d_dy, i) / mult);
+            if (compute_second_order) {
+                setVectorElement(d2_dx2, i, getVectorElement(d2_dx2, i) / mult);
+                setVectorElement(d2_dy2, i, getVectorElement(d2_dy2, i) / mult);
+            }
+        }
     }
 }
