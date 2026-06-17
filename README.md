@@ -49,10 +49,12 @@ A flexible 2-D wave equation solver that supports both manual grid generation an
 The program features a `MESH_MODE` toggle to determine the domain geometry:
 * **Mode 0 (Manual):** Generates a standard rectangular grid based on user-defined boundaries (`x_0`, `x_f`, `y_0`, `y_f`) and intervals (`n_x`, `n_y`).
 * **Mode 1 (File Import):** Reads high-order mesh information (coordinates, connectivity, and boundary nodes) from `high_order_mesh.dat`.
+* **PML  1:** only usable in MODE 0, activates CPML with `PML_LAYERS` number of layers. If `PML = 0`, CPML is not activated.
 
 ## 🧪 Physics & Boundary Conditions
-* **Boundary Conditions:** Supports Dirichlet conditions (displacement fixed at $0.0$) using a lookup table of boundary node IDs loaded from the mesh file.
+* **Boundary Conditions:** Supports Dirichlet conditions (`boundary_conditions = 0`) using a lookup table of boundary node IDs loaded from the mesh file, and Neumann boundary conditions (`boundary_conditions = 1`).
 * **Properties:** Default configuration uses constant density ($\rho = 1.0$) and elasticity ($\mu = 1.0$).
+
 
 ---
 
